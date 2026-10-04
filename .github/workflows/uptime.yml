@@ -7,6 +7,11 @@ on:
   schedule:
     - cron: "*/5 * * * *"
   workflow_dispatch:
+    inputs:
+      simulate_failure:
+        description: "Test the alert path (opens an outage issue, then run again without this to close it)"
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -50,6 +55,7 @@ jobs:
             days=$(( ( $(date -d "$end" +%s) - $(date +%s) ) / 86400 ))
             [ "$days" -lt 14 ] && fails+=("TLS certificate of $host expires in $days days")
           done
+          if [ "${{ inputs.simulate_failure }}" = "true" ]; then fails+=("SIMULATED failure (alert-path test)"); fi
           printf '%s\n' "${fails[@]:-}" > /tmp/fails.txt
           echo "failures=${#fails[@]}" >> "$GITHUB_OUTPUT"
 
