@@ -1,0 +1,91 @@
+name: uptime
+
+# External health check for Farmoon, run from GitHub's network (independent of the server).
+# On failure it opens ONE issue (e-mail to the repo owner); on recovery it closes it.
+# No secrets are used; only public URLs are probed.
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  issues: write
+
+concurrency:
+  group: uptime
+  cancel-in-progress: false
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - name: Probe sites and certificates
+        id: probe
+        shell: bash
+        run: |
+          set -u
+          fails=()
+          http_ok() { # url [required-body-substring]
+            local url="$1" must="${2:-}" code body
+            for attempt in 1 2 3; do
+              code=$(curl -sS -m 15 -o /tmp/body -w '%{http_code}' -A 'farmoon-uptime/1.0' "$url" 2>/dev/null || echo 000)
+              if [ "$code" = "200" ] && { [ -z "$must" ] || grep -q "$must" /tmp/body; }; then return 0; fi
+              sleep 8
+            done
+            fails+=("$url -> HTTP $code")
+            return 1
+          }
+          http_ok https://farmoon.io/
+          http_ok https://api.farmoon.io/health '"status":"ok"'
+          http_ok https://partners.farmoon.io/
+          http_ok https://farmoon.io/sitemap.xml '<urlset'
+          for host in farmoon.io api.farmoon.io partners.farmoon.io; do
+            end=$(echo | openssl s_client -servername "$host" -connect "$host:443" 2>/dev/null | openssl x509 -noout -enddate 2>/dev/null | cut -d= -f2)
+            if [ -z "$end" ]; then fails+=("TLS check failed for $host"); continue; fi
+            days=$(( ( $(date -d "$end" +%s) - $(date +%s) ) / 86400 ))
+            [ "$days" -lt 14 ] && fails+=("TLS certificate of $host expires in $days days")
+          done
+          printf '%s\n' "${fails[@]:-}" > /tmp/fails.txt
+          echo "failures=${#fails[@]}" >> "$GITHUB_OUTPUT"
+
+      - name: Open or close the outage issue
+        shell: bash
+        run: |
+          set -eu
+          gh label create outage --color B60205 --description "Farmoon is unhealthy" --force >/dev/null 2>&1 || true
+          open=$(gh issue list --state open --label outage --json number --jq '.[0].number // empty')
+          if [ "${{ steps.probe.outputs.failures }}" != "0" ]; then
+            if [ -z "$open" ]; then
+              {
+                echo "@dortmonder Farmoon failed its external health check at $(date -u '+%Y-%m-%d %H:%M UTC')."
+                echo
+                sed 's/^/- /' /tmp/fails.txt
+                echo
+                echo "This issue closes itself when the checks pass again."
+              } > /tmp/issue.md
+              gh issue create --title "Farmoon outage detected" --label outage --body-file /tmp/issue.md
+            fi
+          elif [ -n "$open" ]; then
+            gh issue comment "$open" --body "Recovered at $(date -u '+%Y-%m-%d %H:%M UTC'). All checks pass."
+            gh issue close "$open"
+          fi
+
+      - name: Weekly heartbeat (keeps scheduled workflows from being auto-disabled)
+        if: github.event.schedule == '*/5 * * * *'
+        shell: bash
+        run: |
+          set -eu
+          [ "$(date -u +%u%H)" = "100" ] || [ "$(date -u +%u%H)" = "101" ] || exit 0
+          [ "$(date -u +%M)" -lt 5 ] || exit 0
+          sha=$(gh api "repos/$GH_REPO/contents/heartbeat.txt" --jq .sha 2>/dev/null || true)
+          content=$(date -u '+%Y-%m-%dT%H:%MZ' | base64)
+          if [ -n "$sha" ]; then
+            gh api -X PUT "repos/$GH_REPO/contents/heartbeat.txt" -f message="heartbeat" -f content="$content" -f sha="$sha" >/dev/null
+          else
+            gh api -X PUT "repos/$GH_REPO/contents/heartbeat.txt" -f message="heartbeat" -f content="$content" >/dev/null
+          fi
