@@ -49,7 +49,8 @@ jobs:
           http_ok https://api.farmoon.io/health '"status":"ok"'
           http_ok https://partners.farmoon.io/
           http_ok https://farmoon.io/sitemap.xml '<urlset'
-          for host in farmoon.io api.farmoon.io partners.farmoon.io; do
+          http_ok https://errors.farmoon.io/_health/ 'ok'
+          for host in farmoon.io api.farmoon.io partners.farmoon.io errors.farmoon.io; do
             end=$(echo | openssl s_client -servername "$host" -connect "$host:443" 2>/dev/null | openssl x509 -noout -enddate 2>/dev/null | cut -d= -f2)
             if [ -z "$end" ]; then fails+=("TLS check failed for $host"); continue; fi
             days=$(( ( $(date -d "$end" +%s) - $(date +%s) ) / 86400 ))
