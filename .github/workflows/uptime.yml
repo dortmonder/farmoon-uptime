@@ -35,19 +35,23 @@ jobs:
         run: |
           set -u
           fails=()
-          http_ok() { # url [required-body-substring]
-            local url="$1" must="${2:-}" code body
+          # The step runs under `bash -e`, so a failing check must RETURN 0 after recording itself in
+          # `fails`; returning 1 would abort here and skip the outage-issue step and the other checks.
+          http_ok() { # url [required-body-substring] [extra curl flags, e.g. -L]
+            local url="$1" must="${2:-}" extra="${3:-}" code body
             for attempt in 1 2 3; do
-              code=$(curl -sS -m 15 -o /tmp/body -w '%{http_code}' -A 'farmoon-uptime/1.0' "$url" 2>/dev/null || echo 000)
+              # shellcheck disable=SC2086
+              code=$(curl -sS -m 15 $extra -o /tmp/body -w '%{http_code}' -A 'farmoon-uptime/1.0' "$url" 2>/dev/null || echo 000)
               if [ "$code" = "200" ] && { [ -z "$must" ] || grep -q "$must" /tmp/body; }; then return 0; fi
               sleep 8
             done
             fails+=("$url -> HTTP $code")
-            return 1
+            return 0
           }
           http_ok https://farmoon.io/
           http_ok https://api.farmoon.io/health '"status":"ok"'
-          http_ok https://partners.farmoon.io/
+          # The partner panel's root answers 307 -> /partner/panel by design; follow it (max 3 hops).
+          http_ok https://partners.farmoon.io/ "" "-L --max-redirs 3"
           http_ok https://farmoon.io/sitemap.xml '<urlset'
           http_ok https://errors.farmoon.io/_health/ 'ok'
           for host in farmoon.io api.farmoon.io partners.farmoon.io errors.farmoon.io; do
